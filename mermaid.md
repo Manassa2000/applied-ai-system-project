@@ -9,6 +9,7 @@ classDiagram
         +add_pet(pet: Pet)
         +remove_pet(pet: Pet)
         +get_total_available_time() int
+        +get_all_tasks() list~Task~
     }
 
     class Pet {
@@ -34,7 +35,10 @@ classDiagram
         +Frequency frequency
         +time preferred_time
         +String notes
+        +bool completed
+        +date due_date
         +Pet pet
+        +mark_complete() Task
         +get_priority_score() int
         +is_time_sensitive() bool
     }
@@ -60,10 +64,14 @@ classDiagram
 
     class Scheduler {
         +Owner owner
-        +generate_plan(date: date) DailyPlan
-        +_prioritize_tasks(tasks: list~Task~) list~Task~
+        +generate_plan(date) DailyPlan
+        +sort_by_time(tasks) list~Task~
+        +filter_tasks(tasks, completed, pet_name) list~Task~
+        +detect_conflicts(scheduled_tasks) list~String~
+        +mark_task_complete(task) Task
+        +_prioritize_tasks(tasks) list~Task~
         +_fit_tasks(tasks, available_minutes) tuple
-        +_assign_times(tasks: list~Task~) list~ScheduledTask~
+        +_assign_times(tasks) list~ScheduledTask~
         +_build_reasoning(scheduled, unscheduled) list~String~
     }
 
@@ -98,9 +106,10 @@ classDiagram
     Task --> TaskType : typed as
     Task --> Priority : has
     Task --> Frequency : repeats
+    Task --> Task : mark_complete() produces
     Scheduler --> Owner : plans for
     Scheduler --> DailyPlan : generates
-    DailyPlan "1" --> "0..*" ScheduledTask : contains
+    DailyPlan "1" --> "0..*" ScheduledTask : scheduled
     DailyPlan "1" --> "0..*" Task : unscheduled
     ScheduledTask --> Task : wraps
 ```

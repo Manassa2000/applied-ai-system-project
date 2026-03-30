@@ -64,3 +64,35 @@ What the test cases cover:
 
 
 Confidence Level : 4.5 Stars
+
+
+### Features
+
+
+- **Priority-first greedy scheduling** — tasks are ranked by `Priority` enum value (HIGH=3, MEDIUM=2, LOW=1) and selected in order until the owner's daily time budget is exhausted. Higher-priority tasks are always scheduled before lower ones, regardless of insertion order.
+
+- **Time-sensitive task pinning** — tasks with a `preferred_time` (e.g. medications at 8:00 AM) are anchored to their exact time slot. Free tasks fill the remaining gaps sequentially without displacing pinned ones.
+
+- **Time-sensitivity scoring bonus** — tasks with a pinned `preferred_time` receive a +1 score bonus on top of their priority level, ensuring they beat same-priority unpinned tasks in the scheduling queue.
+
+- **Chronological sorting** — `sort_by_time()` sorts any task list by `preferred_time` ascending using a lambda key. Tasks without a preferred time receive a sentinel value of `time(23, 59)` so they sink to the end rather than raising a `TypeError`.
+
+- **Task filtering** — `filter_tasks()` narrows a task list by completion status (`completed=True/False`), pet name (case-insensitive), or both simultaneously. Passing `None` for either argument skips that filter entirely.
+
+- **Conflict detection** — `detect_conflicts()` runs an O(n²) pairwise check over all `ScheduledTask` objects using `overlaps_with()`. Returns a plain-language warning string per conflict without raising exceptions. Back-to-back tasks (one ends exactly when the next begins) are not flagged as conflicts.
+
+- **Automatic daily/weekly recurrence** — `mark_complete()` on a recurring task returns a new `Task` instance with the next `due_date` calculated via `timedelta` (DAILY → +1 day, WEEKLY → +7 days). `AS_NEEDED` tasks return `None`. `mark_task_complete()` on the `Scheduler` automatically registers the next occurrence on the pet's task list.
+
+- **Unscheduled task tracking** — tasks that exceed the remaining time budget are placed in `DailyPlan.unscheduled_tasks` rather than silently dropped, making it clear to the owner what didn't fit and why.
+
+- **Human-readable reasoning log** — `_build_reasoning()` generates a plain-English explanation of every scheduling decision, accessible via `DailyPlan.get_explanation()` and surfaced in the UI under "Why this plan?".
+
+### App Screenshots
+
+**Owner setup, pet management, and task table with priority color coding:**
+
+![Owner setup and task table](screenshots/pawpal_screenshot_1.png)
+
+**Generated daily schedule with conflict detection and feasibility summary:**
+
+![Schedule and conflict detection](screenshots/pawpal_screenshot_2.png)

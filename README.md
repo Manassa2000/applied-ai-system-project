@@ -47,3 +47,20 @@ pip install -r requirements.txt
 
 PawPal+ uses a priority scheduler to build a daily care plan within the owner's available time budget. Tasks are ranked by priority level (HIGH, MEDIUM, LOW) with a bonus for time-sensitive tasks that have a pinned preferred time, such as medications. Pinned tasks are placed at their exact times first; remaining tasks fill the gaps sequentially. The scheduler also detects time conflicts between any two overlapping slots and returns plain-language warnings without crashing. Recurring tasks (daily or weekly) automatically generate their next occurrence when marked complete, using `timedelta` to calculate the due date. Tasks can be filtered by completion status or pet name, and sorted chronologically, making it easy to query exactly what still needs to happen and when. 
 
+### Testing PawPal+
+
+Command to run tests: python -m pytest
+
+What the test cases cover:
+
+| Group | Tests | What they verify |
+|---|---|---|
+| **Happy paths** | 3 | Full plan fits, priority order, pinned time respected |
+| **Recurrence** | 4 | Daily +1 day, weekly +7 days, AS_NEEDED → None, auto-registers on pet |
+| **Sorting** | 2 | Chronological order, unpinned tasks sink to end |
+| **Conflict detection** | 4 | Overlap caught, back-to-back not flagged, same start caught, clean plan = no warnings |
+| **Empty/zero edge cases** | 5 | No tasks, no pets, zero budget, exact fit, over budget |
+| **Filter edge cases** | 3 | No args returns all, unknown pet name, completed=True filter |
+
+
+Confidence Level : 4.5 Stars

@@ -451,6 +451,38 @@ def _dict_to_task(d: dict) -> Task:
     )
 
 
+def _compute_confidence(
+    retrieved_docs: list[dict],
+    warnings: list[str],
+    iterations: int,
+    total_duration: int,
+    budget: int,
+) -> float:
+    """
+    Return a [0.0, 1.0] confidence score for the AI suggestion.
+
+    Penalised when: fewer than 4 RAG docs retrieved, warnings present,
+    extra revision loops were needed, or tasks exceeded the time budget.
+    """
+    score = 1.0
+
+    # RAG coverage penalty: ideal is 4+ docs retrieved
+    doc_ratio = min(len(retrieved_docs) / 4.0, 1.0)
+    score *= 0.5 + 0.5 * doc_ratio  # maps to [0.5, 1.0]
+
+    # Each warning reduces confidence by 15%
+    score *= max(0.0, 1.0 - 0.15 * len(warnings))
+
+    # Extra iterations beyond the first signal the model needed correction
+    score *= max(0.5, 1.0 - 0.2 * max(0, iterations - 1))
+
+    # Budget overrun penalty — proportional to how far over
+    if budget > 0 and total_duration > budget:
+        overrun_ratio = (total_duration - budget) / budget
+        score *= max(0.0, 1.0 - overrun_ratio)
+
+    return round(max(0.0, min(1.0, score)), 2)
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -529,6 +561,8 @@ def _mock_suggest(
     )
     logger.info("Mock mode: returning %d task(s) for species=%s", len(task_objects), species)
 
+    confidence = _compute_confidence(retrieved, warnings, iterations=0, total_duration=total, budget=owner_budget_minutes)
+
     return {
         "tasks":          task_objects,
         "task_dicts":     candidate_tasks,
@@ -536,6 +570,7 @@ def _mock_suggest(
         "reasoning":      reasoning,
         "iterations":     0,
         "warnings":       warnings,
+        "confidence":     confidence,
     }
 
 
@@ -723,9 +758,12 @@ def suggest_tasks(
                 f"Skipped task '{d.get('name', '?')}' due to a conversion error: {exc}"
             )
 
+    total_duration_final = sum(t.duration_minutes for t in task_objects)
+    confidence = _compute_confidence(retrieved, warnings, iterations, total_duration_final, owner_budget_minutes)
+
     logger.info(
-        "suggest_tasks done: %d task(s), %d iteration(s), %d warning(s)",
-        len(task_objects), iterations, len(warnings),
+        "suggest_tasks done: %d task(s), %d iteration(s), %d warning(s), confidence=%.2f",
+        len(task_objects), iterations, len(warnings), confidence,
     )
 
     return {
@@ -735,4 +773,5 @@ def suggest_tasks(
         "reasoning":      reasoning,
         "iterations":     iterations,
         "warnings":       warnings,
+        "confidence":     confidence,
     }

@@ -184,14 +184,16 @@ A single call can't enforce the owner's time budget — the model doesn't know i
 | Local knowledge base (18 chunks) | No external API, fast, transparent | Manual to maintain; no real-time vet updates |
 | Tag-overlap scoring for RAG | Simple, deterministic, debuggable | Less precise than embedding-based similarity |
 | Max 3 agentic iterations | Prevents infinite loops and API cost runaway | Occasionally accepts a slightly over-budget plan with a warning |
-| No AI tests in pytest | Avoids flaky network-dependent tests | AI pipeline reliability relies on the in-loop validator only |
+| Pure-function AI tests (no mock Groq) | 35 offline tests, no API key needed, never flaky | Live LLM call itself remains untested in CI |
 | Streamlit session state | Simplest possible persistence for a demo | State is lost on page refresh; not production-ready |
 
 ---
 
 ## Testing Summary
 
-**Run:** `python -m pytest -v` — all 22 tests pass.
+**Run:** `python -m pytest -v` — all 58 tests pass across two test files.
+
+### Rule-based scheduler — `tests/test_pawpal.py` (23 tests)
 
 | Group | Count | What is verified |
 |---|---|---|
@@ -202,11 +204,37 @@ A single call can't enforce the owner's time budget — the model doesn't know i
 | Edge cases | 5 | No tasks, no pets, zero budget, exact-fit task, over-budget task |
 | Filter edge cases | 3 | No args returns all, unknown pet name, completed=True filter |
 
-**What worked well:** Testing the rule-based scheduler was straightforward because every function is deterministic. Writing edge-case tests first (zero budget, exact fit) actually exposed a subtle off-by-one in the budget check (`<=` vs `<`) that would have been invisible in normal use.
+### AI advisor — `tests/test_ai_advisor.py` (35 tests, no API key required)
 
-**What wasn't tested:** The AI pipeline (`suggest_tasks`, `retrieve_guidelines`, `_validate_task_dicts`) has no automated tests. This is a deliberate trade-off — unit tests for LLM calls are either mocked (unrealistic) or network-dependent (flaky in CI). The validator and budget checker inside the loop provide runtime reliability instead.
+All AI tests run entirely offline against pure functions — no Groq calls are made.
 
-**What I learned:** Deterministic systems are testable by design. The hardest testing work was deciding *what* the correct answer should be for ambiguous edge cases (like a task that fits exactly into the remaining budget), not writing the assertion itself.
+| Group | Count | What is verified |
+|---|---|---|
+| `_age_category` | 8 | Puppy/adult/senior boundaries for dogs and cats, unknown species default, exact boundary ages |
+| `retrieve_guidelines` | 5 | Species-tag drives ranking, `top_k` cap respected, senior/lifecycle prioritisation, health-note boosting |
+| `_validate_task_dicts` | 9 | Valid task passes, all four invalid field types caught individually, multi-error reporting |
+| `_dict_to_task` | 3 | Field mapping to Task object, `preferred_time` string → `time` object, None when omitted |
+| `_mock_suggest` | 5 | Tasks returned for known species, budget enforced, zero-budget returns empty, unknown species falls back gracefully, confidence key present |
+| `_compute_confidence` | 5 | Clean result ≥ 0.8, score drops with warnings/extra iterations/budget overrun, always clamped to [0.0, 1.0] |
+
+### Confidence scoring
+
+Every call to `suggest_tasks` and `_mock_suggest` now returns a `confidence` value (0.0–1.0) computed from four signals:
+
+| Signal | Penalty |
+|---|---|
+| Fewer than 4 RAG docs retrieved | Score scales from 0.5 (0 docs) to 1.0 (4+ docs) |
+| Each validation warning | −15% per warning |
+| Extra revision iterations | −20% per loop beyond the first |
+| Budget overrun | Penalised proportionally to how far over |
+
+A typical successful run (6 docs retrieved, no warnings, 1 iteration, within budget) scores **1.0**. A run that needed 3 iterations and had 2 warnings scores approximately **0.57**.
+
+**What worked well:** Because the AI-specific functions (`_age_category`, `retrieve_guidelines`, `_validate_task_dicts`, `_dict_to_task`) are pure functions with no network dependency, they are straightforward to test exhaustively. The one initially failing test — asserting that an unknown species ("fish") returns an empty list — revealed a genuine insight: the retrieval is tag-based, not species-gated, so lifecycle stage tags like "adult" can surface docs even without a species match. The test was updated to document that behavior rather than paper over it.
+
+**What still isn't tested:** The live LLM call inside `suggest_tasks` (the actual Groq API round-trip) has no automated test. Unit-testing it would require either a mock Groq client (unrealistic responses) or a live key in CI (fragile and costly). The in-loop schema validator and budget checker already enforce correctness at runtime.
+
+**What I learned:** Separating pure logic from I/O makes AI systems testable by design. Every reliability mechanism in the advisor — RAG scoring, validation, budget checking, confidence scoring — is a plain Python function with no side effects, and therefore fully unit-testable without any mocking.
 
 ---
 
@@ -225,4 +253,4 @@ The third lesson was about **the gap between "works in theory" and "works in pra
 - **Embedding-based RAG** using sentence transformers would be more accurate than tag overlap for retrieving guidelines, especially for unusual breeds or health conditions.
 - **Streaming responses** would improve the UI feel for the agentic loop — right now the spinner blocks until all iterations complete.
 - **Persistent storage** (even a local SQLite file) would make the app genuinely useful day-to-day, since Streamlit session state is wiped on refresh.
-- **Tests for the AI pipeline** using a mock Groq client would let me verify that the validator and feedback logic work correctly without needing a live API key in CI.
+- **A mock Groq client** would let me test the full `suggest_tasks` agentic loop (multi-iteration feedback, schema-error recovery) without a live API key in CI, completing coverage of the one remaining untested path.

@@ -31,6 +31,7 @@ import json
 import logging
 import os
 import re
+import uuid
 from datetime import time as dtime
 from typing import Optional
 
@@ -451,6 +452,48 @@ def _dict_to_task(d: dict) -> Task:
     )
 
 
+def _parse_failed_generation(failed_gen: str) -> dict | None:
+    """
+    Parse tool-call args from Groq's ``failed_generation`` string.
+
+    The model uses two legacy formats that the API rejects with 400:
+
+      Format A  <function=name [{"tasks": ...}]>      (array inside angle brackets)
+      Format B  <function=name>{"tasks": ...}</function>  (object, optional closing tag)
+
+    Both formats are handled so the agentic loop can recover the args and
+    continue — including running schema validation on them.
+    """
+    def _load(raw: str) -> dict | None:
+        # Strip optional XML-style closing tag before parsing
+        raw = re.sub(r"</function>\s*$", "", raw.strip()).strip()
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return None
+        if isinstance(parsed, list):
+            parsed = parsed[0] if parsed else None
+        if isinstance(parsed, dict) and "tasks" in parsed:
+            return parsed
+        return None
+
+    # Format B: <function=name>JSON…</function>
+    match_b = re.search(r"<function=\w+>([\[{].*)", failed_gen, re.DOTALL)
+    if match_b:
+        result = _load(match_b.group(1))
+        if result is not None:
+            return result
+
+    # Format A: <function=name [JSON]>
+    match_a = re.search(r"<function=\w+\s+([\[{].*?)>\s*$", failed_gen, re.DOTALL)
+    if match_a:
+        result = _load(match_a.group(1))
+        if result is not None:
+            return result
+
+    return None
+
+
 def _compute_confidence(
     retrieved_docs: list[dict],
     warnings: list[str],
@@ -639,7 +682,9 @@ def suggest_tasks(
         "Base your suggestions on the care guidelines provided — do not invent facts. "
         "Call the `submit_task_list` tool exactly once when you are ready. "
         "Use specific task names (e.g. 'Morning Walk', 'Evening Feed', not just 'Walk'). "
-        "Suggest 4–8 tasks. Only include tasks the owner can realistically do at home."
+        "Suggest 4–8 tasks. Only include tasks the owner can realistically do at home. "
+        "IMPORTANT: the only valid frequency values are: daily, twice_daily, weekly, as_needed. "
+        "Never use 'monthly' — use 'as_needed' for infrequent tasks like nail trims."
     )
 
     user_message = (
@@ -671,25 +716,44 @@ def suggest_tasks(
         iterations += 1
         logger.info("Agentic loop: iteration %d / %d", iterations, MAX_ITERATIONS)
 
-        response = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=messages,
-            tools=[_SUBMIT_TOOL],
-            tool_choice="required",
-            max_tokens=1500,
-        )
+        try:
+            response = client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=messages,
+                tools=[_SUBMIT_TOOL],
+                tool_choice="required",
+                max_tokens=1500,
+            )
+            args = None
+            msg  = response.choices[0].message
+            logger.info("Iteration %d: finish_reason=%s", iteration + 1, response.choices[0].finish_reason)
 
-        msg = response.choices[0].message
-        logger.info("Iteration %d: finish_reason=%s", iteration + 1, response.choices[0].finish_reason)
+            if not msg.tool_calls:
+                text = msg.content or "(no content)"
+                warnings.append(f"Iteration {iteration + 1}: model returned no tool call — {text[:200]}")
+                logger.warning("No tool call on iteration %d: %s", iteration + 1, text[:200])
+                break
 
-        if not msg.tool_calls:
-            text = msg.content or "(no content)"
-            warnings.append(f"Iteration {iteration + 1}: model returned no tool call — {text[:200]}")
-            logger.warning("No tool call on iteration %d: %s", iteration + 1, text[:200])
-            break
+            tool_call = msg.tool_calls[0]
+            args = json.loads(tool_call.function.arguments)
 
-        tool_call       = msg.tool_calls[0]
-        args            = json.loads(tool_call.function.arguments)
+        except Exception as api_err:
+            # Groq returns 400 when the model uses the legacy <function=name [...]> syntax.
+            # Try to recover the args from the failed_generation field in the error body.
+            err_body = getattr(api_err, "body", {}) or {}
+            failed_gen = (err_body.get("error") or {}).get("failed_generation", "")
+            if failed_gen:
+                args = _parse_failed_generation(failed_gen)
+            if not failed_gen or args is None:
+                raise  # unrecoverable — propagate to the UI
+            logger.warning(
+                "Iteration %d: recovered args from failed_generation (legacy function-call format)",
+                iteration + 1,
+            )
+            # Create a fake tool_call id so the budget-feedback message can reference it
+            tool_call = type("_FakeToolCall", (), {"id": str(uuid.uuid4())})()
+            msg       = type("_FakeMsg",      (), {"content": None, "tool_calls": None})()
+
         candidate_tasks = args.get("tasks", [])
         reasoning       = args.get("reasoning", "")
 
@@ -706,8 +770,11 @@ def suggest_tasks(
                 + "\n".join(f"  • {e}" for e in schema_errors)
             )
             logger.warning("Schema errors on iteration %d: %s", iteration + 1, schema_errors)
-            messages.append({"role": "assistant", "content": msg.content, "tool_calls": msg.tool_calls})
-            messages.append({"role": "tool", "tool_call_id": tool_call.id, "content": feedback})
+            if msg.tool_calls:
+                messages.append({"role": "assistant", "content": msg.content, "tool_calls": msg.tool_calls})
+                messages.append({"role": "tool", "tool_call_id": tool_call.id, "content": feedback})
+            else:
+                messages.append({"role": "user", "content": feedback})
             continue
 
         # ── Budget check ──────────────────────────────────────────────────────
@@ -744,8 +811,11 @@ def suggest_tasks(
             f"{owner_budget_minutes} minutes, then resubmit."
         )
         logger.info("Over budget by %d min — requesting revision (next: iteration %d)", overage, iteration + 2)
-        messages.append({"role": "assistant", "content": msg.content, "tool_calls": msg.tool_calls})
-        messages.append({"role": "tool", "tool_call_id": tool_call.id, "content": feedback})
+        if msg.tool_calls:
+            messages.append({"role": "assistant", "content": msg.content, "tool_calls": msg.tool_calls})
+            messages.append({"role": "tool", "tool_call_id": tool_call.id, "content": feedback})
+        else:
+            messages.append({"role": "user", "content": feedback})
 
     # ── Step 7: Convert accepted dicts → Task objects ─────────────────────────
     task_objects: list[Task] = []

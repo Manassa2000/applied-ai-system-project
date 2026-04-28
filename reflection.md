@@ -1,108 +1,39 @@
 # PawPal+ Project Reflection
 
-## 1. System Design
 
-**a. Initial design**
+**Limitations and biases**
 
-- Briefly describe your initial UML design.
-- What classes did you include, and what responsibilities did you assign to each?
+The system has several limitations worth naming honestly:
 
-The UML design consists of 6 classes and 3 enums.
+- **Narrow knowledge base.** The RAG corpus covers 18 chunks across four species (dogs, cats, rabbits, birds). For anything outside that set — reptiles, fish, hamsters. The model gets no retrieved context and falls back on whatever Llama 3.3 absorbed in training, which may be inaccurate or outdated.
+- **Tag-overlap retrieval is literal.** A dog described as having "mobility difficulty" surfaces the arthritis entries less strongly than one described with the exact word "arthritis." The system rewards owners who already know the clinical vocabulary, the opposite of who needs the most guidance.
+- **Breed and regional bias.** Llama 3.3 likely has far deeper training data on popular Western breeds (Labrador, Golden Retriever, Poodle) than on uncommon ones. Exercise and grooming advice may be less accurate for less-represented breeds. The knowledge base also assumes heartworm prevention is needed year-round, which is not true in all climates.
+- **No individual medical history.** Two eight-year-old Labradors with completely different health histories receive the same "senior dog" guidelines. The system has no way to weigh a specific animal's diagnosed conditions against generic lifecycle advice.
 
-Owner — holds the pet owner's profile and daily time budget (available_minutes, preferred_start_time, preferred_end_time). Responsible for managing the list of pets.
-Pet — stores an individual animal's details (species, breed, age, weight, health notes) and owns a list of Task objects. Responsible for task management per pet.
-Task — represents a single care activity (walk, feed, meds, etc.). Holds scheduling-relevant data: duration_minutes, priority, frequency, and an optional preferred_time for time-sensitive tasks like medications.
-ScheduledTask — a decorator around Task that adds a concrete start_time and end_time. Keeps the original Task data clean while representing placement in the day.
-DailyPlan — the output of the scheduler. Holds two lists: tasks that were successfully scheduled and tasks that couldn't fit. Also stores a reasoning log explaining decisions.
-Scheduler — the only class with real algorithmic logic. Takes an Owner and produces a DailyPlan by prioritizing tasks, fitting them within available time, assigning time slots, and building a human-readable explanation.
-The three enums (TaskType, Priority, Frequency) keep allowed values explicit and prevent invalid inputs like typos in strings.
+**Misuse potential and prevention**
 
-**b. Design changes**
+The most realistic misuse is an owner treating AI-generated task suggestions as a substitute for veterinary advice especially for a sick or newly-diagnosed pet. A user who enters "kidney disease" in the health notes field might trust the returned task list as a complete care protocol, when the medication timing and dietary details should come from a vet, not an LLM prompted with an 18-chunk knowledge base.
 
-- Did your design change during implementation?   Yes
-- If yes, describe at least one change and why you made it.
+A subtler risk is prompt injection through the health notes field: a user could enter text designed to override the system prompt and elicit arbitrary output from the model.
 
-One of the biggest changes was in the Task class where the initial design was to make the mark_complete() return boolean. But inorder to handle the implementation of recurring tasks ( daily, twice daily, weekly), it was necessary that it had information about the frequency and due_date(if there was any). Now, the return type changed to either Task/ None. 
+*Preventions already in place:*
+- Retrieved knowledge-base chunks are shown in the UI under an expander ("What the AI saw"), so the user can trace every suggestion back to its source.
+- Forcing `tool_choice="required"` with a strict JSON schema prevents the model from producing free-form text, which limits the blast radius of prompt injection — the output must conform to the schema regardless of what the prompt said.
 
-Another change was adding get_all_tasks() to Owner. The original UML had Scheduler talking directly to Pet.tasks, but that created an issue that the scheduler would need have to know the internal structure of every pet. Moving the aggregation into Owner means the scheduler only needs to call one method and gets a flat list back, keeping each class's responsibility clean.
+*Preventions that should be added:*
+- A visible disclaimer that suggestions are not veterinary advice and should be reviewed with a vet for sick or medicated animals.
+- Input sanitization on the health notes field to strip injection patterns before they reach the model.
 
-Another one was adding four methods : sort_by_time(), filter_tasks(), detect_conflicts(), and mark_task_complete() to the Scheduler which was not initially planned in the designing. This was added only during implementation. 
+**c. Surprises during reliability testing**
 
+The most surprising result came from a test I expected to be trivially true: asserting that an unknown species ("fish") would return an empty list from `retrieve_guidelines`. It failed. The reason was non-obvious: "fish" with age 1.0 maps to the lifecycle label "adult," and "adult" is a tag in `dog_exercise_adult`. So the retrieval returns dog exercise docs for a fish not because the species matched, but because the lifecycle stage did. There is no species gate; any positive score qualifies an entry for inclusion.
 
----
+This is a real reliability gap: an owner who accidentally selects the wrong species would receive confident-sounding but completely irrelevant guidelines, and the system would give no warning. The test was updated to document this behavior rather than hide it behind a forced assertion, and it surfaced a concrete improvement adding a minimum-score threshold that requires at least a species or lifecycle match, not just any tag overlap.
 
-## 2. Scheduling Logic and Tradeoffs
+**d. AI collaboration**
 
-**a. Constraints and priorities**
+Claude Code was used from time to time for this project for design feedback, debugging, writing boilerplate, and explaining unfamiliar APIs (especially the Groq function-calling format).
 
-- What constraints does your scheduler consider (for example: time, priority, preferences)?
-- How did you decide which constraints mattered most?
+*One instance where the AI gave a helpful suggestion:* When implementing confidence scoring, Claude proposed structuring the function as four independent multiplicative penalties like RAG coverage, warnings, extra iterations, and budget overrun rather than a single additive score. The multiplicative structure was the right call: it means compounding problems compound the penalty too. A result with two warnings and a budget overrun scores far lower than either issue alone, which correctly reflects that both failing at once is worse than either in isolation. I wouldn't have landed on that design without the suggestion.
 
-The scheduler considers four constraints: the owner's daily time budget, task priority (HIGH/MEDIUM/LOW, scored 3/2/1), time sensitivity (tasks with a preferred_time like medications get a +1 bonus and are pinned to their exact slot), and the owner's preferred start time (sets where free tasks begin). Time budget was treated as the hardest constraint because it is non-negotiable. Within that, time-sensitive tasks rank above raw priority because a medication at 8 AM cannot be shifted by a scheduling algorithm. Medical necessity has a fixed time dimension that a flat priority score alone does not capture.
-
-**b. Tradeoffs**
-
-- Describe one tradeoff your scheduler makes.
-- Why is that tradeoff reasonable for this scenario?
-
-Tradeoff: Greedy scheduling by priority, ignoring total time optimality
-
-The greedy approach is reasonable here because pet care has genuine hard priorities like medications and feeding, and a greedy algorithm naturally honors that by locking them in first.  A busy pet owner needs to trust the plan quickly; "meds were scheduled first because they are HIGH priority" is immediately understandable. The tradeoff is also mitigated by the unscheduled_tasks list, which makes dropped tasks visible so the owner can adjust their time budget or reprioritize manually.
-
----
-
-## 3. AI Collaboration
-
-**a. How you used AI**
-
-- How did you use AI tools during this project (for example: design brainstorming, debugging, refactoring)?
-- What kinds of prompts or questions were most helpful?
-
-I used AI as a buddy along the whole process from time to time. I felt the kind of prompts that helped the best were inline chat and specifically mentioning a line to ask about what happens there or questions surrounding it. Answers from those prompts were really meaningful and made absolute sense. 
-
-**b. Judgment and verification**
-
-- Describe one moment where you did not accept an AI suggestion as-is.
-- How did you evaluate or verify what the AI suggested?
-
-In the planning phase when drawing the UML diagram, initially the Claude suggested some design plan which I couldn't understand and didn't think it had some logic. I questioned the Claude again with a scenario asking what will happen in this case and then it changed the design accordingly. 
-
----
-
-## 4. Testing and Verification
-
-**a. What you tested**
-
-- What behaviors did you test?
-- Why were these tests important?
-
-The tests covered six behavioral groups: happy paths (all tasks fit, priority ordering, pinned times), recurrence logic (daily/weekly next-occurrence dates, AS_NEEDED returning None), chronological sorting, conflict detection (overlaps caught, back-to-back not flagged), empty/zero edge cases (no pets, zero budget, exact-fit), and filter correctness. These were important because the scheduler's core promise that HIGH-priority and time-sensitive tasks always get scheduled first within the budget is easy to break silently, and the recurrence and conflict logic involve boundary conditions (off-by-one dates, touching vs. overlapping slots) where a single wrong operator produces incorrect behavior without raising an error.
-
-**b. Confidence**
-
-- How confident are you that your scheduler works correctly?
-- What edge cases would you test next if you had more time?
-
-Confident in the core scheduling, priority ordering, recurrence, and conflict detection. All 23 tests pass and cover both happy paths and boundary conditions. Given more time, the next edge cases to test would be two pinned tasks at the same time competing for the same slot, and a TWICE_DAILY task verifying it recurs correctly within the same day rather than the next.
-
----
-
-## 5. Reflection
-
-**a. What went well**
-
-- What part of this project are you most satisfied with?
-
-I am mostly satisfied with the backened( implementing scheduling, handling recurring tasks and handling conflicts). 
-
-**b. What you would improve**
-
-- If you had another iteration, what would you improve or redesign?
-
-If I had another iteration, I would first work on the UI improvement. It serves the purpose now but I would really like to add some more colors to the page. 
-
-**c. Key takeaway**
-
-- What is one important thing you learned about designing systems or working with AI on this project?
-
-One important takeaway for me from doing this project was that eventhough AI assists in things and does things quickly, we should always have the upper hand on what needs to be done and how it needs to be done. 
+*One instance where the suggestion was flawed:* When writing the test for unknown-species retrieval, Claude initially wrote `assert docs == []`, reasoning that "fish" has no entries in the knowledge base and should therefore return nothing. That test failed because Claude did not trace through the actual scoring logic specifically that lifecycle tags like "adult" are shared across all species entries and still fire even when the species tag misses. The fix required understanding the retrieval internals myself and rewriting the test to document the real behavior instead of the assumed one. This was a concrete reminder that AI-generated tests can be confidently wrong: the assertion looked reasonable on the surface but was built on an incorrect assumption about how the function worked internally. 

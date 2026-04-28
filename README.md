@@ -4,9 +4,15 @@ A Streamlit app that combines rule-based scheduling with a Retrieval-Augmented G
 
 ---
 
+## Demo
+
+[Watch the walkthrough on Loom](https://www.loom.com/share/51f0599f825d46309566bb3ac571a846)
+
+---
+
 ## Origin: The Original PawPal+ Project
 
-The original **PawPal+** (Module 2 project) was a fully rule-based Streamlit app. Owners could register pets, add care tasks with priorities and durations, and the system would generate a greedy daily schedule — placing high-priority tasks first, pinning time-sensitive ones (like medications) to their preferred slots, and reporting anything that didn't fit within the owner's time budget. It also handled recurring tasks (daily/weekly auto-recurrence), conflict detection between overlapping slots, and task filtering by pet or status. **It had no AI component at all** — every decision was deterministic Python logic.
+The original **PawPal+** (Week 5 project) was a fully rule-based Streamlit app. Owners could register pets, add care tasks with priorities and durations, and the system would generate a greedy daily schedule placing high-priority tasks first, pinning time-sensitive ones (like medications) to their preferred slots, and reporting anything that didn't fit within the owner's time budget. It also handled recurring tasks (daily/weekly auto-recurrence), conflict detection between overlapping slots, and task filtering by pet or status. **It had no AI component at all** — every decision was deterministic Python logic.
 
 This version adds a genuine AI feature on top of that foundation: an AI Advisor that uses a local knowledge base and a Groq-hosted LLM to suggest a personalized task list for any registered pet, grounded in species-specific veterinary guidelines rather than generic heuristics.
 
@@ -14,7 +20,7 @@ This version adds a genuine AI feature on top of that foundation: an AI Advisor 
 
 ## What This Project Does and Why It Matters
 
-Pet owners often don't know exactly *how much* exercise a puppy needs, or *how often* a senior cat should see the vet. Generic advice online is hard to turn into a concrete daily plan. PawPal+ closes that gap: given a pet's species, breed, age, and any health notes, the AI Advisor retrieves relevant veterinary guidelines from a local knowledge base, passes them to an LLM, and gets back a structured task list — respecting the owner's actual time budget through a self-correcting feedback loop.
+Pet owners often don't know exactly *how much* exercise a puppy needs, or *how often* a senior cat should see the vet. Generic advice online is hard to turn into a concrete daily plan. PawPal+ closes that gap: given a pet's species, breed, age, and any health notes, the AI Advisor retrieves relevant veterinary guidelines from a local knowledge base, passes them to an LLM, and gets back a structured task list respecting the owner's actual time budget through a self-correcting feedback loop.
 
 Because AI-generated tasks are converted into the same `Task` objects as manually-entered ones, they immediately flow through the existing priority scheduler, conflict detector, and reasoning log. The AI layer is additive, not a replacement for the rule-based system.
 
@@ -32,9 +38,9 @@ The system flows through five tiers:
 
 **Data Model** (`pawpal_system.py`): `Owner` → `Pet` → `Task` hierarchy. All state lives here regardless of how a task was created.
 
-**RAG Retriever** (`ai_advisor.py`): Before any LLM call, 18 veterinary care chunks are scored by tag overlap — species match (+3), lifecycle stage (+2), breed/health keywords (+1). The top-6 are injected directly into the prompt so the model reasons from evidence, not memory.
+**RAG Retriever** (`ai_advisor.py`): Before any LLM call, 18 veterinary care chunks are scored by tag overlap species match (+3), lifecycle stage (+2), breed/health keywords (+1). The top-6 are injected directly into the prompt so the model reasons from evidence, not memory.
 
-**Agentic Loop** (`ai_advisor.py`): The LLM is forced (via `tool_choice="required"`) to call a `submit_task_list` tool with a strict JSON schema. After each call the system runs two automated checks — schema validation and budget enforcement — and if either fails, structured feedback is appended to the message history for the model to revise. This repeats up to 3 times.
+**Agentic Loop** (`ai_advisor.py`): The LLM is forced (via `tool_choice="required"`) to call a `submit_task_list` tool with a strict JSON schema. After each call the system runs two automated checks, schema validation and budget enforcement — and if either fails, structured feedback is appended to the message history for the model to revise. This repeats up to 3 times.
 
 **Rule-Based Scheduler** (`pawpal_system.py`): Purely deterministic. Greedy priority-first planning, chronological sorting, and pairwise conflict detection. No AI involved.
 
@@ -163,7 +169,7 @@ This demonstrates the agentic self-correction: the model doesn't just truncate t
 
 ### Why Groq + Llama 3.3 instead of a bigger model?
 
-Groq offers a genuine free tier (14,400 requests/day, no billing required) with sub-second latency on `llama-3.3-70b-versatile`. The alternatives explored — Anthropic Claude (requires billing) and Google Gemini (free tier returned `limit: 0` errors on this account) — were not accessible without payment. The chosen stack is reproducible by anyone with a free Groq account.
+Groq offers a genuine free tier (14,400 requests/day, no billing required) with sub-second latency on `llama-3.3-70b-versatile`. The alternatives explored were Anthropic Claude (requires billing) and Google Gemini (free tier returned `limit: 0` errors on this account) were not accessible without payment. The chosen stack is reproducible by anyone with a free Groq account.
 
 ### Why RAG instead of just prompting the LLM?
 
@@ -171,11 +177,11 @@ A bare prompt asking "what tasks does a Labrador need?" produces inconsistent ou
 
 ### Why `tool_choice="required"` with a strict JSON schema?
 
-Free-form LLM output is unpredictable. Asking the model to "output a JSON list" often produces markdown fences, prose explanations, or wrong field names. Forcing a tool call means the model must conform to a defined schema — enum values, integer ranges, required fields. This makes downstream validation and conversion to `Task` objects reliable, not fragile string parsing.
+Free-form LLM output is unpredictable. Asking the model to "output a JSON list" often produces markdown fences, prose explanations, or wrong field names. Forcing a tool call means the model must conform to a defined schema enum values, integer ranges, required fields. This makes downstream validation and conversion to `Task` objects reliable, not fragile string parsing.
 
 ### Why an agentic loop instead of a single call?
 
-A single call can't enforce the owner's time budget — the model doesn't know it exceeded it until the system checks. The loop lets the system act as a supervisor: check the output, explain the problem in plain language, and give the model a chance to fix it. In practice, budget overages are corrected in one or two extra iterations at negligible cost.
+A single call can't enforce the owner's time budget. The model doesn't know it exceeded it until the system checks. The loop lets the system act as a supervisor: check the output, explain the problem in plain language, and give the model a chance to fix it. In practice, budget overages are corrected in one or two extra iterations at negligible cost.
 
 ### Trade-offs made
 
@@ -230,11 +236,11 @@ Every call to `suggest_tasks` and `_mock_suggest` now returns a `confidence` val
 
 A typical successful run (6 docs retrieved, no warnings, 1 iteration, within budget) scores **1.0**. A run that needed 3 iterations and had 2 warnings scores approximately **0.57**.
 
-**What worked well:** Because the AI-specific functions (`_age_category`, `retrieve_guidelines`, `_validate_task_dicts`, `_dict_to_task`) are pure functions with no network dependency, they are straightforward to test exhaustively. The one initially failing test — asserting that an unknown species ("fish") returns an empty list — revealed a genuine insight: the retrieval is tag-based, not species-gated, so lifecycle stage tags like "adult" can surface docs even without a species match. The test was updated to document that behavior rather than paper over it.
+**What worked well:** Because the AI-specific functions (`_age_category`, `retrieve_guidelines`, `_validate_task_dicts`, `_dict_to_task`) are pure functions with no network dependency, they are straightforward to test exhaustively. The one initially failing test asserting that an unknown species ("fish") returns an empty list revealed a genuine insight: the retrieval is tag-based, not species-gated, so lifecycle stage tags like "adult" can surface docs even without a species match. The test was updated to document that behavior rather than paper over it.
 
 **What still isn't tested:** The live LLM call inside `suggest_tasks` (the actual Groq API round-trip) has no automated test. Unit-testing it would require either a mock Groq client (unrealistic responses) or a live key in CI (fragile and costly). The in-loop schema validator and budget checker already enforce correctness at runtime.
 
-**What I learned:** Separating pure logic from I/O makes AI systems testable by design. Every reliability mechanism in the advisor — RAG scoring, validation, budget checking, confidence scoring — is a plain Python function with no side effects, and therefore fully unit-testable without any mocking.
+**What I learned:** Separating pure logic from I/O makes AI systems testable by design. Every reliability mechanism in the advisor — RAG scoring, validation, budget checking, confidence scoring is a plain Python function with no side effects, and therefore fully unit-testable without any mocking.
 
 ---
 
@@ -242,15 +248,15 @@ A typical successful run (6 docs retrieved, no warnings, 1 iteration, within bud
 
 ### What this project taught me about AI
 
-The biggest lesson was that **AI outputs are not reliable by default — they need structural enforcement**. Using a JSON schema tool call instead of free-form text eliminated an entire class of bugs. The model never produces an invalid `task_type` because it literally cannot — the schema prevents it. This principle (constrain the output space, don't just hope the model behaves) feels like the most transferable thing I learned.
+The biggest lesson was that **AI outputs are not reliable by default — they need structural enforcement**. Using a JSON schema tool call instead of free-form text eliminated an entire class of bugs. The model never produces an invalid `task_type` because it literally cannot do it. The schema prevents it. This principle (constrain the output space, don't just hope the model behaves) feels like the most transferable thing I learned.
 
-The second lesson was about **RAG as a trust mechanism**. Without it, the model might hallucinate plausible-sounding but wrong advice (e.g., exercise durations for specific breeds). With it, every suggestion is traceable to a specific knowledge-base chunk visible in the UI. That transparency matters — both for debugging and for building the user's trust.
+The second lesson was about **RAG as a trust mechanism**. Without it, the model might hallucinate plausible-sounding but wrong advice (e.g., exercise durations for specific breeds). With it, every suggestion is traceable to a specific knowledge-base chunk visible in the UI. That transparency matters both for debugging and for building the user's trust.
 
-The third lesson was about **the gap between "works in theory" and "works in practice"**. I spent significant time navigating real-world API access issues (Anthropic requires billing, Gemini returned `limit: 0` errors despite a valid key). The final stack — Groq with Llama 3.3 — wasn't the original plan, but finding it forced me to understand the OpenAI-compatible API pattern, which is now the de facto standard across providers.
+The third lesson was about **the gap between "works in theory" and "works in practice"**. I spent significant time navigating real-world API access issues (Anthropic requires billing, Gemini returned `limit: 0` errors despite a valid key). The final stack Groq with Llama 3.3 — wasn't the original plan, but finding it forced me to understand the OpenAI-compatible API pattern, which is now the de facto standard across providers.
 
 ### What I'd do differently
 
 - **Embedding-based RAG** using sentence transformers would be more accurate than tag overlap for retrieving guidelines, especially for unusual breeds or health conditions.
-- **Streaming responses** would improve the UI feel for the agentic loop — right now the spinner blocks until all iterations complete.
+- **Streaming responses** would improve the UI feel for the agentic loop. Right now the spinner blocks until all iterations complete.
 - **Persistent storage** (even a local SQLite file) would make the app genuinely useful day-to-day, since Streamlit session state is wiped on refresh.
 - **A mock Groq client** would let me test the full `suggest_tasks` agentic loop (multi-iteration feedback, schema-error recovery) without a live API key in CI, completing coverage of the one remaining untested path.

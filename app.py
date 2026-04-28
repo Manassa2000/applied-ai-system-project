@@ -1,9 +1,27 @@
+import logging
+import os
+
 import streamlit as st
 from datetime import date, time
+try:
+    from dotenv import load_dotenv
+except ImportError:
+    load_dotenv = lambda: None  # python-dotenv not installed; rely on env vars
+
 from pawpal_system import (
     Owner, Pet, Task,
     TaskType, Priority, Frequency,
     Scheduler,
+)
+from ai_advisor import suggest_tasks
+
+# Load .env if present (for GROQ_API_KEY in local dev)
+load_dotenv()
+
+# Route all library loggers to the terminal where `streamlit run` is executed
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s  %(levelname)-8s  %(name)s — %(message)s",
 )
 
 st.set_page_config(page_title="PawPal+", page_icon="🐾", layout="centered")
@@ -19,6 +37,9 @@ PRIORITY_EMOJI = {
 # --- Session State Initialization ---
 if "owner" not in st.session_state:
     st.session_state.owner = None
+# ai_suggestions: dict keyed by pet name → result dict from suggest_tasks()
+if "ai_suggestions" not in st.session_state:
+    st.session_state.ai_suggestions = {}
 
 # ------------------------------------------------------------------ #
 # SECTION 1: Owner Setup
@@ -238,3 +259,105 @@ else:
         # --- Reasoning log ---
         with st.expander("Why this plan?"):
             st.text(plan.get_explanation())
+
+st.divider()
+
+# ------------------------------------------------------------------ #
+# SECTION 5: AI Task Advisor
+# ------------------------------------------------------------------ #
+st.subheader("5. AI Task Advisor")
+st.caption(
+    "Powered by Llama 3.3 (Groq) + RAG. "
+    "The AI retrieves relevant care guidelines from a local knowledge base "
+    "and generates a task list that fits your time budget. "
+    "Requires GROQ_API_KEY in your environment or a .env file."
+)
+
+if st.session_state.owner is None or not st.session_state.owner.pets:
+    st.info("Add an owner and at least one pet before using the AI advisor.")
+else:
+    api_key_present = bool(os.environ.get("GROQ_API_KEY", "").strip())
+    if not api_key_present:
+        st.warning(
+            "GROQ_API_KEY is not set. "
+            "Create a `.env` file with `GROQ_API_KEY=sk-...` and restart the app."
+        )
+
+    pet_names    = [p.name for p in st.session_state.owner.pets]
+    advisor_pet  = st.selectbox("Get suggestions for", pet_names, key="advisor_pet")
+    selected_pet = next(p for p in st.session_state.owner.pets if p.name == advisor_pet)
+
+    if st.button("Get AI Suggestions", disabled=not api_key_present):
+        with st.spinner(f"Retrieving guidelines and generating tasks for {advisor_pet}…"):
+            try:
+                result = suggest_tasks(
+                    pet_name=selected_pet.name,
+                    species=selected_pet.species,
+                    breed=selected_pet.breed,
+                    age_years=selected_pet.age,
+                    health_notes=selected_pet.health_notes,
+                    owner_budget_minutes=st.session_state.owner.available_minutes,
+                )
+                st.session_state.ai_suggestions[advisor_pet] = result
+                st.success(
+                    f"Generated {len(result['tasks'])} suggestion(s) "
+                    f"in {result['iterations']} agentic loop iteration(s)."
+                )
+            except Exception as exc:
+                st.error(f"AI advisor error: {exc}")
+
+    # --- Display last result for the selected pet ---
+    result = st.session_state.ai_suggestions.get(advisor_pet)
+    if result:
+        # Non-fatal warnings (e.g. budget overage after max loops)
+        for w in result["warnings"]:
+            st.warning(f"⚠️ {w}")
+
+        # Retrieved knowledge base chunks (RAG transparency)
+        with st.expander(f"Knowledge base chunks retrieved ({len(result['retrieved_docs'])} docs)"):
+            for doc in result["retrieved_docs"]:
+                st.markdown(f"**`{doc['id']}`** — {doc['text']}")
+
+        # AI reasoning
+        with st.expander("AI reasoning"):
+            st.write(result["reasoning"] or "_(no reasoning returned)_")
+
+        # Suggested tasks table
+        if result["task_dicts"]:
+            total_min = sum(t["duration_minutes"] for t in result["task_dicts"])
+            budget    = st.session_state.owner.available_minutes
+            st.write(
+                f"**Suggested tasks** — {total_min} min total "
+                f"({'within' if total_min <= budget else 'over'} {budget}-min budget):"
+            )
+            suggestion_rows = [
+                {
+                    "Task":      d["name"],
+                    "Type":      d["task_type"],
+                    "Duration":  f"{d['duration_minutes']} min",
+                    "Priority":  PRIORITY_EMOJI[d["priority"]],
+                    "Frequency": d["frequency"],
+                    "Pinned":    d.get("preferred_time") or "—",
+                    "Notes":     d.get("notes") or "—",
+                }
+                for d in result["task_dicts"]
+            ]
+            st.table(suggestion_rows)
+
+            # One-click add button
+            if st.button(f"Add all {len(result['tasks'])} suggestions to {advisor_pet}"):
+                added = 0
+                for task in result["tasks"]:
+                    # Skip if a task with the same name already exists on this pet
+                    existing_names = {t.name for t in selected_pet.tasks}
+                    if task.name not in existing_names:
+                        selected_pet.add_task(task)
+                        added += 1
+                skipped = len(result["tasks"]) - added
+                st.success(f"Added {added} task(s) to {advisor_pet}." +
+                           (f" Skipped {skipped} duplicate(s)." if skipped else ""))
+                # Clear the cached suggestions so stale data isn't re-added
+                del st.session_state.ai_suggestions[advisor_pet]
+                st.rerun()
+        else:
+            st.info("No tasks were suggested.")
